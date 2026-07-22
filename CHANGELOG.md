@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Automated Linux release builds via GitHub Actions: pushing a `v*` tag builds
+  `.deb` and `.AppImage` installers with `tauri-apps/tauri-action` and attaches
+  them to a draft GitHub Release. Closes #1.
 - Internationalization (i18n) with `react-i18next`: English is the default UI
   language, with a Portuguese (`pt-BR`) locale included. UI strings are
   organized into per-view namespaces.
