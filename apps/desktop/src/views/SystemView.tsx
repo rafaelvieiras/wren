@@ -25,7 +25,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useCheckUpdates } from "@/lib/queries";
 import { useSettingsStore } from "@/lib/store";
-import type { PasteMethod } from "@/lib/tauri";
+import type { LogLevel, PasteMethod } from "@/lib/tauri";
 
 /**
  * Text delivery methods (mirrors the domain's `PasteMethod`). The `value` is the
@@ -56,6 +56,18 @@ const PASTE_METHODS: {
     labelKey: "delivery.method.wtype.label",
     hintKey: "delivery.method.wtype.hint",
   },
+];
+
+/**
+ * Logger verbosity (mirrors the domain's `LogLevel`). `value` is the backend
+ * contract; `labelKey` points at the `system` i18n namespace.
+ */
+const LOG_LEVELS: { value: LogLevel; labelKey: string }[] = [
+  { value: "error", labelKey: "logging.level.error" },
+  { value: "warn", labelKey: "logging.level.warn" },
+  { value: "info", labelKey: "logging.level.info" },
+  { value: "debug", labelKey: "logging.level.debug" },
+  { value: "trace", labelKey: "logging.level.trace" },
 ];
 
 /** Subtle (i) with a tooltip hint — replaces the old tiny ⓘ marks. */
@@ -169,6 +181,31 @@ export default function SystemView() {
               />
             }
           />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("logging.title")}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Field label={t("logging.level.label")} hint={t("logging.level.hint")}>
+            <Select
+              value={settings.log_level}
+              onValueChange={(v) => setField("log_level", v as LogLevel)}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {LOG_LEVELS.map((lv) => (
+                  <SelectItem key={lv.value} value={lv.value}>
+                    {t(lv.labelKey)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
         </CardContent>
       </Card>
 

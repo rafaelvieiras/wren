@@ -15,7 +15,7 @@ pub mod vad_earshot;
 
 pub use audio_cpal::{list_input_devices, CpalAudioSource, LevelCallback};
 pub use feedback_sound::ToneFeedback;
-pub use logging::{init_logging, LogBuffer, LogRecord};
+pub use logging::{init_logging, set_log_level, LogBuffer, LogRecord};
 pub use storage::{JsonSettingsStore, JsonlHistoryStore, SystemClock, WavRecordingStore};
 pub use telemetry::JsonlTelemetryStore;
 pub use textsink_paste::ClipboardPasteSink;

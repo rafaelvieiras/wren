@@ -20,15 +20,16 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use wren_adapters::{
     init_logging, list_input_devices as adapter_list_input_devices,
-    list_models as adapter_list_models, storage::default_data_dir, ClipboardPasteSink,
-    CpalAudioSource, EarshotVad, JsonSettingsStore, JsonlHistoryStore, JsonlTelemetryStore,
-    LogBuffer, LogRecord, RemoteApiTranscriber, SystemClock, ToneFeedback, WavRecordingStore,
+    list_models as adapter_list_models, set_log_level, storage::default_data_dir,
+    ClipboardPasteSink, CpalAudioSource, EarshotVad, JsonSettingsStore, JsonlHistoryStore,
+    JsonlTelemetryStore, LogBuffer, LogRecord, RemoteApiTranscriber, SystemClock, ToneFeedback,
+    WavRecordingStore,
 };
 use wren_core::{
     egress_is_external, factory_presets, ActivationMode, CompositeFeedback, DictationService,
-    EntryStatus, Feedback as FeedbackPort, HistoryEntry, HistoryStore, PortError, ProviderConfig,
-    ProviderKind, SessionMetrics, SessionState, Settings, SettingsStore, ToggleOutcome,
-    TranscriptionOptions,
+    EntryStatus, Feedback as FeedbackPort, HistoryEntry, HistoryStore, LogLevel, PortError,
+    ProviderConfig, ProviderKind, SessionMetrics, SessionState, Settings, SettingsStore,
+    ToggleOutcome, TranscriptionOptions,
 };
 
 use feedback::TauriFeedback;
@@ -418,6 +419,18 @@ fn copy_last_transcription(app: AppHandle) {
     });
 }
 
+/// Maps the domain's `LogLevel` to the `log` crate's filter (composition-layer
+/// concern — `wren-core` stays free of the `log` dependency).
+fn log_level_filter(level: LogLevel) -> log::LevelFilter {
+    match level {
+        LogLevel::Error => log::LevelFilter::Error,
+        LogLevel::Warn => log::LevelFilter::Warn,
+        LogLevel::Info => log::LevelFilter::Info,
+        LogLevel::Debug => log::LevelFilter::Debug,
+        LogLevel::Trace => log::LevelFilter::Trace,
+    }
+}
+
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> Result<Settings, String> {
     state.settings_store.load().map_err(|e| e.to_string())
@@ -444,6 +457,10 @@ fn save_settings(
         .settings_store
         .save(&settings)
         .map_err(|e| e.to_string())?;
+
+    // Takes effect immediately, no restart needed (log::set_max_level is a
+    // global atomic) — so raising the level to debug a live issue works right away.
+    set_log_level(log_level_filter(settings.log_level));
 
     // Rebuild the service with the new provider and re-register the shortcut —
     // switching provider is config, not reinstallation (doc 01).
@@ -745,17 +762,22 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // Central logging FIRST — from here on every `log::` is captured
+            // Settings load FIRST so the logger can start at the user's
+            // persisted `log_level` (default `Info`) instead of always
+            // capturing DEBUG — a production install shouldn't accumulate
+            // verbose noise on disk unless the user opts in.
+            let settings_store = Arc::new(JsonSettingsStore::at_default_location());
+            let settings = settings_store.load().unwrap_or_default();
+
+            // Central logging — from here on every `log::` is captured
             // (stderr + rotating file + ring buffer). 100% local diagnostics.
             let log_dir = default_data_dir().join("logs");
-            let logs = init_logging(log_dir.clone());
+            let logs = init_logging(log_dir.clone(), log_level_filter(settings.log_level));
             log::info!(target: "wren", "Wren starting");
 
-            let settings_store = Arc::new(JsonSettingsStore::at_default_location());
             let history = Arc::new(JsonlHistoryStore::at_default_location());
             let recordings = Arc::new(WavRecordingStore::at_default_location());
             let telemetry = Arc::new(JsonlTelemetryStore::at_default_location());
-            let settings = settings_store.load().unwrap_or_default();
 
             let service = build_service(
                 &handle,

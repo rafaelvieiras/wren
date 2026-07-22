@@ -61,6 +61,7 @@ export const settings = {
   paste_method: "paste",
   restore_clipboard: false,
   launch_at_login: true,
+  log_level: "info",
 };
 
 export const providerPresets = [

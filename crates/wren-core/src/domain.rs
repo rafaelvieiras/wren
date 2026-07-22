@@ -280,6 +280,21 @@ pub enum PasteMethod {
     Wtype,
 }
 
+/// Verbosity of the local diagnostics logger (file + ring buffer + stderr).
+/// Ships defaulting to `Info` so a production install doesn't accumulate
+/// DEBUG/TRACE noise on disk; the user can raise it from Settings › System
+/// when troubleshooting (doc: Diagnostics tab).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+    Trace,
+}
+
 /// The user's persisted preferences.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -329,6 +344,10 @@ pub struct Settings {
     /// authority).
     #[serde(default)]
     pub launch_at_login: bool,
+    /// Minimum severity captured by the local logger. Absent in old
+    /// settings.json ⇒ `Info`.
+    #[serde(default)]
+    pub log_level: LogLevel,
 }
 
 fn default_compress_pauses_over_ms() -> Option<u64> {
@@ -464,6 +483,7 @@ impl Default for Settings {
             paste_method: PasteMethod::default(),
             restore_clipboard: false,
             launch_at_login: false,
+            log_level: LogLevel::default(),
         }
     }
 }

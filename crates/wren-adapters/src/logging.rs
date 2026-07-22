@@ -188,8 +188,9 @@ struct WrenLogger {
 
 impl Log for WrenLogger {
     fn enabled(&self, _metadata: &Metadata) -> bool {
-        // The effective level is controlled by `set_max_level`; here we accept
-        // everything that arrived (DEBUG+).
+        // The effective level is controlled by `set_max_level` (see
+        // `init_logging`/`set_log_level`); the `log` macros already filter
+        // against it before a record reaches here, so we accept everything.
         true
     }
 
@@ -222,18 +223,29 @@ impl Log for WrenLogger {
 /// command the UI queries). Call ONCE at boot; on hot-reload the process
 /// persists and the second call would be ignored (`log` only accepts one global
 /// logger).
-pub fn init_logging(dir: PathBuf) -> Arc<LogBuffer> {
+///
+/// `level` is the initial minimum severity captured (file + ring buffer +
+/// stderr) — it comes from the user's persisted `Settings::log_level`, so a
+/// production install doesn't accumulate DEBUG/TRACE noise by default. Change
+/// it later at runtime with `set_log_level`.
+pub fn init_logging(dir: PathBuf, level: LevelFilter) -> Arc<LogBuffer> {
     let buffer = Arc::new(LogBuffer::new(BUFFER_CAP));
     let logger = WrenLogger {
         buffer: buffer.clone(),
         file: Mutex::new(RotatingFile::open(&dir)),
     };
     if log::set_boxed_logger(Box::new(logger)).is_ok() {
-        log::set_max_level(LevelFilter::Debug);
+        log::set_max_level(level);
     } else {
         eprintln!("[wren] logger already initialized; ignoring re-initialization");
     }
     buffer
+}
+
+/// Changes the captured severity at runtime (e.g. right after `save_settings`),
+/// with no restart needed — `log::set_max_level` is a global atomic.
+pub fn set_log_level(level: LevelFilter) {
+    log::set_max_level(level);
 }
 
 #[cfg(test)]
