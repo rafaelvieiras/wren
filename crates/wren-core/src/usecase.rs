@@ -105,18 +105,32 @@ impl DictationService {
     /// returns to Idle IMMEDIATELY, without waiting for the timeout. It is
     /// Escape's emergency exit.
     pub fn cancel(&self) {
-        let mut state = self.state.lock().unwrap();
-        match *state {
+        // Transition to Idle under the lock, then do the (possibly slow)
+        // teardown work AFTER releasing it — same discipline as `finish`:
+        // never hold `state` across a blocking call into the audio adapter,
+        // or a wedged device teardown (e.g. cpal stream drop stuck on a
+        // sleep/resume or a yanked USB mic) would deadlock every future
+        // `state()`/`toggle()`/`cancel()` call, including the one driving the
+        // global shortcut handler itself.
+        let previous = {
+            let mut state = self.state.lock().unwrap();
+            let previous = *state;
+            match previous {
+                SessionState::Recording => *state = SessionState::Idle,
+                SessionState::Transcribing => {
+                    self.epoch.fetch_add(1, Ordering::SeqCst);
+                    *state = SessionState::Idle;
+                }
+                SessionState::Idle => {}
+            }
+            previous
+        };
+        match previous {
             SessionState::Recording => {
                 self.audio.abort();
-                *state = SessionState::Idle;
                 self.feedback.cancelled();
             }
-            SessionState::Transcribing => {
-                self.epoch.fetch_add(1, Ordering::SeqCst);
-                *state = SessionState::Idle;
-                self.feedback.cancelled();
-            }
+            SessionState::Transcribing => self.feedback.cancelled(),
             SessionState::Idle => {}
         }
     }

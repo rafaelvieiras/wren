@@ -6,12 +6,20 @@
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use wren_core::{AudioClip, AudioSource, PortError};
 
 /// Level callback (RMS in [0,1]) — feeds the bubble animation.
 pub type LevelCallback = Arc<dyn Fn(f32) + Send + Sync>;
+
+/// How long `finish()` waits for the recording thread to tear down (stream
+/// drop) before giving up on it. A wedged cpal teardown (sleep/resume
+/// transition, a mic yanked mid-stream) must not block the caller forever —
+/// callers include `DictationService::cancel`, invoked from the global
+/// shortcut handler.
+const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct ActiveRecording {
     stop_tx: mpsc::Sender<()>,
@@ -54,6 +62,22 @@ impl CpalAudioSource {
             return Ok(None);
         };
         let _ = recording.stop_tx.send(());
+
+        // Poll instead of a blocking `join()`: if the thread never reaches
+        // the deadline, its `JoinHandle` is just dropped here — the OS thread
+        // keeps running detached and gets reaped whenever it does eventually
+        // finish. That is preferable to the caller (and anything relying on a
+        // lock it holds) blocking indefinitely on a wedged teardown.
+        let deadline = Instant::now() + TEARDOWN_TIMEOUT;
+        while !recording.handle.is_finished() {
+            if Instant::now() >= deadline {
+                return Err(PortError::AudioUnavailable(
+                    "audio device teardown timed out".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
         let recorded = recording
             .handle
             .join()
