@@ -122,6 +122,16 @@ function Invoke-Worker([string]$Exe, [byte[]]$Pcm, [int]$TimeoutSec = 420) {
   return @{ Code = $p.ExitCode; Out = $outTask.Result.Trim(); Err = $errTask.Result.Trim() }
 }
 
+# Same worker call, but stdin comes from a file via cmd.exe redirection (no
+# PowerShell pipe involved) and stdout/stderr go to files.
+function Invoke-WorkerRedirect([string]$Exe, [string]$PcmFile, [string]$Tag) {
+  $o = Join-Path $OutDir "worker-$Tag.redirect.stdout.txt"
+  $e = Join-Path $OutDir "worker-$Tag.redirect.stderr.txt"
+  $cmd = "`"`"$Exe`" __wren-transcribe-worker `"$ModelDir`" < `"$PcmFile`" > `"$o`" 2> `"$e`"`""
+  & cmd.exe /c $cmd
+  return @{ Code = $LASTEXITCODE; Out = (Get-Content $o -Raw -Encoding UTF8); Err = (Get-Content $e -Raw -Encoding UTF8) }
+}
+
 function Test-Worker([string]$Phase, [string]$Exe) {
   $tag = $Phase -replace '[^A-Za-z0-9]', '-'
   if (-not $ModelDir -or -not (Test-Path (Join-Path $ModelDir 'encoder-model.int8.onnx'))) {
@@ -129,7 +139,16 @@ function Test-Worker([string]$Phase, [string]$Exe) {
     return
   }
   $pcm = Get-WavPcm $GoldenWav
-  Write-Host "worker input: $($pcm.Length) bytes of PCM"
+  $peak = 0; for ($i = 0; $i -lt $pcm.Length - 1; $i += 2) { $v = [Math]::Abs([BitConverter]::ToInt16($pcm, $i)); if ($v -gt $peak) { $peak = $v } }
+  Write-Host "worker input: $($pcm.Length) bytes of PCM, peak amplitude $peak"
+  $pcmFile = Join-Path $OutDir "input-$tag.pcm"
+  [System.IO.File]::WriteAllBytes($pcmFile, $pcm)
+  $rd = Invoke-WorkerRedirect $Exe $pcmFile $tag
+  $rdText = ''
+  try { $rdText = [string](($rd.Out | ConvertFrom-Json).text) } catch { }
+  $rdPreview = if ($rdText.Length -gt 60) { $rdText.Substring(0, 60) } else { $rdText }
+  Add-Result $Phase 'worker via stdin redirect (no PS pipe)' 'INFO' "exit $($rd.Code); text length $($rdText.Length): '$rdPreview'"
+  Remove-Item $pcmFile -ErrorAction SilentlyContinue
   $r = Invoke-Worker $Exe $pcm
   # Keep the raw output: a wrong score is undiagnosable without it.
   [System.IO.File]::WriteAllText((Join-Path $OutDir "worker-$tag.stdout.txt"), [string]$r.Out, (New-Object System.Text.UTF8Encoding($false)))
@@ -155,7 +174,10 @@ function Test-Worker([string]$Phase, [string]$Exe) {
 
 # Starts the app (with test env vars) and checks the first seconds of life.
 function Test-AppLife([string]$Phase, [scriptblock]$Start, [string[]]$DataRoots, [string]$Tag) {
+  # The app opens the settings window at boot only with this trigger (no tray in CI).
+  $env:WREN_TEST_SETTINGS = '1'
   & $Start
+  Remove-Item Env:\WREN_TEST_SETTINGS -ErrorAction SilentlyContinue
   Start-Sleep -Seconds $SettleSeconds
 
   $proc = Get-Process wren-desktop -ErrorAction SilentlyContinue | Select-Object -First 1
