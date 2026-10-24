@@ -101,29 +101,11 @@ function Get-Words([string]$Text) {
   return ($Text.ToLowerInvariant() -replace '[^\p{L}\p{N}\s]', ' ') -split '\s+' | Where-Object { $_ }
 }
 
-# Runs `<exe> __wren-transcribe-worker <model>` feeding PCM on stdin.
-function Invoke-Worker([string]$Exe, [byte[]]$Pcm, [int]$TimeoutSec = 420) {
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $Exe
-  $psi.Arguments = "__wren-transcribe-worker `"$ModelDir`""
-  $psi.UseShellExecute = $false
-  $psi.RedirectStandardInput = $true
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.CreateNoWindow = $true
-  $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-  $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
-  $p = [System.Diagnostics.Process]::Start($psi)
-  $outTask = $p.StandardOutput.ReadToEndAsync()
-  $errTask = $p.StandardError.ReadToEndAsync()
-  $p.StandardInput.BaseStream.Write($Pcm, 0, $Pcm.Length)
-  $p.StandardInput.Close()
-  if (-not $p.WaitForExit($TimeoutSec * 1000)) { $p.Kill(); return @{ Code = -999; Out = ''; Err = 'timeout' } }
-  return @{ Code = $p.ExitCode; Out = $outTask.Result.Trim(); Err = $errTask.Result.Trim() }
-}
-
-# Same worker call, but stdin comes from a file via cmd.exe redirection (no
-# PowerShell pipe involved) and stdout/stderr go to files.
+# Runs `<exe> __wren-transcribe-worker <model>` with the PCM on stdin.
+# stdin comes from a file via cmd.exe redirection on purpose: feeding binary
+# data through System.Diagnostics.Process.StandardInput in Windows PowerShell
+# 5.1 produced a worker run with empty text (run 3 evidence: same audio, same
+# binary, redirect works), so the test harness avoids that pipe.
 function Invoke-WorkerRedirect([string]$Exe, [string]$PcmFile, [string]$Tag) {
   $o = Join-Path $OutDir "worker-$Tag.redirect.stdout.txt"
   $e = Join-Path $OutDir "worker-$Tag.redirect.stderr.txt"
@@ -139,30 +121,22 @@ function Test-Worker([string]$Phase, [string]$Exe) {
     return
   }
   $pcm = Get-WavPcm $GoldenWav
-  $peak = 0; for ($i = 0; $i -lt $pcm.Length - 1; $i += 2) { $v = [Math]::Abs([BitConverter]::ToInt16($pcm, $i)); if ($v -gt $peak) { $peak = $v } }
-  Write-Host "worker input: $($pcm.Length) bytes of PCM, peak amplitude $peak"
   $pcmFile = Join-Path $OutDir "input-$tag.pcm"
   [System.IO.File]::WriteAllBytes($pcmFile, $pcm)
-  $rd = Invoke-WorkerRedirect $Exe $pcmFile $tag
-  $rdText = ''
-  try { $rdText = [string](($rd.Out | ConvertFrom-Json).text) } catch { }
-  $rdPreview = if ($rdText.Length -gt 60) { $rdText.Substring(0, 60) } else { $rdText }
-  Add-Result $Phase 'worker via stdin redirect (no PS pipe)' 'INFO' "exit $($rd.Code); text length $($rdText.Length): '$rdPreview'"
+  $r = Invoke-WorkerRedirect $Exe $pcmFile $tag
   Remove-Item $pcmFile -ErrorAction SilentlyContinue
-  $r = Invoke-Worker $Exe $pcm
-  # Keep the raw output: a wrong score is undiagnosable without it.
-  [System.IO.File]::WriteAllText((Join-Path $OutDir "worker-$tag.stdout.txt"), [string]$r.Out, (New-Object System.Text.UTF8Encoding($false)))
-  [System.IO.File]::WriteAllText((Join-Path $OutDir "worker-$tag.stderr.txt"), [string]$r.Err, (New-Object System.Text.UTF8Encoding($false)))
   if ($r.Code -ne 0) {
-    Add-Result $Phase 'worker transcription' 'FAIL' ("exit $($r.Code): " + $r.Err.Substring(0, [Math]::Min(400, $r.Err.Length)))
+    $err = [string]$r.Err
+    Add-Result $Phase 'worker transcription' 'FAIL' ("exit $($r.Code): " + $err.Substring(0, [Math]::Min(400, $err.Length)))
     return
   }
-  try { $obj = $r.Out | ConvertFrom-Json } catch {
-    Add-Result $Phase 'worker transcription' 'FAIL' "stdout is not one JSON line: $($r.Out.Substring(0, [Math]::Min(200, $r.Out.Length)))"
+  try { $obj = ([string]$r.Out) | ConvertFrom-Json } catch {
+    $o = [string]$r.Out
+    Add-Result $Phase 'worker transcription' 'FAIL' "stdout is not one JSON line: $($o.Substring(0, [Math]::Min(200, $o.Length)))"
     return
   }
   $ref = Get-Words (Get-Content $GoldenTxt -Raw -Encoding UTF8)
-  $hyp = Get-Words $obj.text
+  $hyp = Get-Words ([string]$obj.text)
   $set = @{}; foreach ($w in $hyp) { $set[$w] = $true }
   $hit = ($ref | Where-Object { $set.ContainsKey($_) }).Count
   $recall = [Math]::Round($hit / [Math]::Max(1, $ref.Count), 2)
