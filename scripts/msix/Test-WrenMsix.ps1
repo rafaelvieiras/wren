@@ -111,6 +111,8 @@ function Invoke-Worker([string]$Exe, [byte[]]$Pcm, [int]$TimeoutSec = 420) {
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
   $psi.CreateNoWindow = $true
+  $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
   $p = [System.Diagnostics.Process]::Start($psi)
   $outTask = $p.StandardOutput.ReadToEndAsync()
   $errTask = $p.StandardError.ReadToEndAsync()
@@ -121,12 +123,17 @@ function Invoke-Worker([string]$Exe, [byte[]]$Pcm, [int]$TimeoutSec = 420) {
 }
 
 function Test-Worker([string]$Phase, [string]$Exe) {
+  $tag = $Phase -replace '[^A-Za-z0-9]', '-'
   if (-not $ModelDir -or -not (Test-Path (Join-Path $ModelDir 'encoder-model.int8.onnx'))) {
     Add-Result $Phase 'worker transcription' 'INFO' 'skipped: no model available'
     return
   }
   $pcm = Get-WavPcm $GoldenWav
+  Write-Host "worker input: $($pcm.Length) bytes of PCM"
   $r = Invoke-Worker $Exe $pcm
+  # Keep the raw output: a wrong score is undiagnosable without it.
+  [System.IO.File]::WriteAllText((Join-Path $OutDir "worker-$tag.stdout.txt"), [string]$r.Out, (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText((Join-Path $OutDir "worker-$tag.stderr.txt"), [string]$r.Err, (New-Object System.Text.UTF8Encoding($false)))
   if ($r.Code -ne 0) {
     Add-Result $Phase 'worker transcription' 'FAIL' ("exit $($r.Code): " + $r.Err.Substring(0, [Math]::Min(400, $r.Err.Length)))
     return
@@ -141,14 +148,14 @@ function Test-Worker([string]$Phase, [string]$Exe) {
   $hit = ($ref | Where-Object { $set.ContainsKey($_) }).Count
   $recall = [Math]::Round($hit / [Math]::Max(1, $ref.Count), 2)
   $status = if ($recall -ge 0.8) { 'PASS' } else { 'FAIL' }
-  Add-Result $Phase 'worker transcription' $status "word recall $recall; load $($obj.load_ms) ms, infer $($obj.infer_ms) ms"
+  $preview = [string]$obj.text
+  if ($preview.Length -gt 80) { $preview = $preview.Substring(0, 80) }
+  Add-Result $Phase 'worker transcription' $status "word recall $recall (ref $($ref.Count) words, hyp $($hyp.Count)); load $($obj.load_ms) ms, infer $($obj.infer_ms) ms; text: '$preview'"
 }
 
 # Starts the app (with test env vars) and checks the first seconds of life.
-function Test-AppLife([string]$Phase, [scriptblock]$Start, [string]$DataRoot, [string]$Tag) {
-  $env:WREN_TEST_SETTINGS = '1'
+function Test-AppLife([string]$Phase, [scriptblock]$Start, [string[]]$DataRoots, [string]$Tag) {
   & $Start
-  Remove-Item Env:\WREN_TEST_SETTINGS -ErrorAction SilentlyContinue
   Start-Sleep -Seconds $SettleSeconds
 
   $proc = Get-Process wren-desktop -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -162,10 +169,11 @@ function Test-AppLife([string]$Phase, [scriptblock]$Start, [string]$DataRoot, [s
 
   Save-Screenshot (Join-Path $OutDir "screen-$Tag.png")
 
-  $logDir = Join-Path $DataRoot 'logs'
-  $log = Join-Path $logDir 'wren.log'
-  if (Test-Path $log) {
-    Add-Result $Phase 'log file written at expected data dir' 'PASS' $log
+  # Look in every candidate location and report which one the app really used
+  # (inside MSIX the data may be virtualized into the package private store).
+  $log = $DataRoots | ForEach-Object { Join-Path $_ 'logs\wren.log' } | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if ($log) {
+    Add-Result $Phase 'log file written (data dir located)' 'PASS' $log
     $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
     Copy-Item $log (Join-Path $OutDir "wren-$Tag.log") -ErrorAction SilentlyContinue
     if ($text -match 'Wren starting') { Add-Result $Phase 'app logged startup' 'PASS' } else { Add-Result $Phase 'app logged startup' 'FAIL' 'no "Wren starting" line' }
@@ -174,12 +182,10 @@ function Test-AppLife([string]$Phase, [scriptblock]$Start, [string]$DataRoot, [s
       $line = ($text -split "`n" | Where-Object { $_ -match 'wren::shortcut' } | Select-Object -First 1)
       Add-Result $Phase 'global shortcut registered' 'FAIL' "$line"
     }
-    if ($text -match '\bDEBUG\b') { Add-Result $Phase 'seeded settings.json was read' 'PASS' 'DEBUG lines present (log_level=debug from the seeded file)' }
-    else { Add-Result $Phase 'seeded settings.json was read' 'INFO' 'no DEBUG lines: seeded settings may not be visible to the app, or nothing logged at debug' }
     $auto = ($text -split "`n" | Where-Object { $_ -match 'autostart' })
     if ($auto) { Add-Result $Phase 'autostart log lines' 'INFO' (($auto | Select-Object -First 2) -join ' | ') }
   } else {
-    Add-Result $Phase 'log file written at expected data dir' 'FAIL' "missing: $log"
+    Add-Result $Phase 'log file written (data dir located)' 'FAIL' ("not found in: " + ($DataRoots -join '; '))
   }
 
   $runValues = @()
@@ -196,7 +202,7 @@ function Test-AppLife([string]$Phase, [scriptblock]$Start, [string]$DataRoot, [s
 Write-Host '=== control: unpackaged exe ==='
 Reset-RealState
 Write-SeedSettings
-Test-AppLife 'control' { Start-Process -FilePath $ExePath } $roamingWren 'control'
+Test-AppLife 'control' { Start-Process -FilePath $ExePath } @($roamingWren) 'control'
 Test-Worker 'control' $ExePath
 
 # ---------------------------------------------------------------- install the MSIX
@@ -226,7 +232,9 @@ if ($pfn) {
     if (Test-Path $alias) { Start-Process -FilePath $alias }
     else { Start-Process "shell:AppsFolder\$pfn!Wren" }
   }
-  Test-AppLife 'msix' $startPackaged $dataRoot 'msix'
+  $realLogsBefore = Test-Path (Join-Path $roamingWren 'logs')
+  Add-Result 'msix' 'real %APPDATA% logs absent before launch' $(if ($realLogsBefore) { 'FAIL' } else { 'PASS' }) 'guards against stale files from the control run'
+  Test-AppLife 'msix' $startPackaged @($dataRoot, $roamingWren) 'msix'
 
   # Where did the data really go?
   if (Test-Path (Join-Path $roamingWren 'logs')) {
