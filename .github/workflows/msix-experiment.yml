@@ -1,0 +1,98 @@
+name: msix-experiment
+
+# Experiment only (never publishes anything): packs the Wren binary as an MSIX,
+# installs it on a Windows runner and checks the behaviours that can break
+# inside the MSIX container (data dir virtualization, autostart, the worker
+# subcommand, global shortcut, WebView2). See scripts/msix/.
+# A self-signed throwaway certificate is used; a Store submission would be
+# re-signed by Microsoft.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiment/msix-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  msix:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      # This experiment is about packaging, not performance: skip fat LTO to
+      # keep the cold build reasonable.
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the app binary (no bundle)
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          npm ci
+          npx tauri build --no-bundle
+
+      - name: Stage the binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force stage | Out-Null
+          Copy-Item target/release/wren-desktop.exe stage/
+          Get-ChildItem target/release -Filter *.dll | Copy-Item -Destination stage/
+          Get-ChildItem stage | Format-Table Name, Length
+
+      - name: Pack and sign the MSIX (throwaway cert)
+        shell: powershell
+        run: ./scripts/msix/New-WrenMsix.ps1 -ExeDir stage -OutDir msix-out
+
+      - name: Cache the Parakeet model
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\models
+          key: parakeet-v3-int8-v1
+
+      - name: Download the Parakeet model (for the worker check)
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'models\parakeet-v3-int8'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $base = 'https://huggingface.co/smcleod/parakeet-tdt-0.6b-v3-int8/resolve/main'
+          foreach ($f in 'config.json','vocab.txt','nemo128.onnx','decoder_joint-model.int8.onnx','encoder-model.int8.onnx') {
+            Invoke-WebRequest "$base/$f" -OutFile (Join-Path $dir $f) -MaximumRetryCount 3 -RetryIntervalSec 5
+          }
+          Get-ChildItem $dir | Format-Table Name, Length
+
+      - name: Install and test the MSIX
+        shell: powershell
+        run: |
+          ./scripts/msix/Test-WrenMsix.ps1 `
+            -Msix msix-out\WrenDictationTest.msix `
+            -Cer msix-out\wren-test.cer `
+            -ExePath (Resolve-Path stage\wren-desktop.exe).Path `
+            -ModelDir (Join-Path $env:RUNNER_TEMP 'models\parakeet-v3-int8') `
+            -OutDir test-out
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msix-experiment
+          path: |
+            test-out/
+            msix-out/*.cer
+            msix-out/layout/AppxManifest.xml
+          if-no-files-found: warn
